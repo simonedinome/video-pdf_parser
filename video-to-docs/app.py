@@ -16,13 +16,11 @@ from src.pipeline.generator import DocumentationGenerator
 _COST_TABLE: dict[str, tuple[float, float]] = {
     "google": (0.15, 0.60),       # Gemini 2.5 Flash input/output
     "openrouter": (0.15, 0.60),   # same model via OpenRouter
-    "openai": (2.50, 10.00),      # GPT-4o
 }
 
 PROVIDER_LABELS: dict[str, str] = {
     "Google Gemini": "google",
     "OpenRouter": "openrouter",
-    "OpenAI": "openai",
 }
 
 HTML_MODE_LABELS: dict[str, str] = {
@@ -70,108 +68,134 @@ with st.sidebar:
 # Main area
 # ---------------------------------------------------------------------------
 st.title("video-to-docs")
-st.markdown("Carica un video e genera documentazione strutturata con AI.")
+st.markdown("Carica uno o più video e genera documentazione strutturata con AI.")
 
-uploaded = st.file_uploader(
-    "Carica un video",
+uploaded_files = st.file_uploader(
+    "Carica video",
     type=SUPPORTED_EXTENSIONS,
-    help=f"Formati supportati: {', '.join(SUPPORTED_EXTENSIONS)}. Max {MAX_UPLOAD_MB} MB.",
+    accept_multiple_files=True,
+    help=f"Formati supportati: {', '.join(SUPPORTED_EXTENSIONS)}. Max {MAX_UPLOAD_MB} MB per file.",
 )
 
-generate_btn = st.button("Genera documentazione", type="primary", disabled=uploaded is None)
+generate_btn = st.button(
+    "Genera documentazione",
+    type="primary",
+    disabled=not uploaded_files,
+)
 
-if generate_btn and uploaded is not None:
+if generate_btn and uploaded_files:
     # --- Validations ---------------------------------------------------------
     if not api_key:
         st.error("Inserisci una API key nella sidebar o configurala nel file .env.")
         st.stop()
 
-    file_size_mb = len(uploaded.getvalue()) / (1024 * 1024)
-    if file_size_mb > MAX_UPLOAD_MB:
-        st.error(f"Il file è {file_size_mb:.1f} MB — il limite è {MAX_UPLOAD_MB} MB.")
-        st.stop()
-
-    if provider_key == "openrouter" and file_size_mb > 19:
-        st.error(
-            f"Il file è {file_size_mb:.1f} MB. "
-            "OpenRouter supporta al massimo 19 MB. Usa Google Gemini per file più grandi."
-        )
-        st.stop()
-
-    # Check ffmpeg availability
+    # Check ffmpeg availability once
     if shutil.which("ffmpeg") is None:
         st.warning(
             "ffmpeg non trovato nel PATH — gli screenshot non verranno estratti. "
             "Installa ffmpeg per abilitare l'estrazione automatica."
         )
 
-    # --- Prepare temp video --------------------------------------------------
-    tmp_video = Path(tempfile.mktemp(suffix=Path(uploaded.name).suffix))
-    tmp_video.write_bytes(uploaded.getvalue())
+    all_results: list[dict] = []
+    all_zip_contents: dict[str, bytes] = {}  # stem -> zip_bytes (for individual downloads)
 
-    settings = Settings(
-        provider=provider_key,
-        api_key=api_key,
-    )
+    for idx, uploaded in enumerate(uploaded_files, 1):
+        st.markdown(f"**Video {idx}/{len(uploaded_files)}: {uploaded.name}**")
 
-    generator = DocumentationGenerator(
-        settings=settings,
-        video_path=tmp_video,
-        html_mode=html_mode,
-    )
+        file_size_mb = len(uploaded.getvalue()) / (1024 * 1024)
+        if file_size_mb > MAX_UPLOAD_MB:
+            st.error(f"{uploaded.name}: file {file_size_mb:.1f} MB — il limite è {MAX_UPLOAD_MB} MB. Saltato.")
+            continue
 
-    # --- Run pipeline with progress ------------------------------------------
-    progress_bar = st.progress(0)
-    status = st.status("Avvio generazione...", expanded=True)
-    result_data: dict | None = None
+        if provider_key == "openrouter" and file_size_mb > 19:
+            st.error(
+                f"{uploaded.name}: {file_size_mb:.1f} MB. "
+                "OpenRouter supporta al massimo 19 MB. Usa Google Gemini per file più grandi. Saltato."
+            )
+            continue
 
-    try:
-        for event in generator.generate():
-            pct = event.get("pct", 0)
-            msg = event.get("message", "")
-            progress_bar.progress(pct / 100, text=msg)
-            status.update(label=msg)
+        tmp_video = Path(tempfile.mktemp(suffix=Path(uploaded.name).suffix))
+        tmp_video.write_bytes(uploaded.getvalue())
 
-            if "result" in event:
-                result_data = event["result"]
+        settings = Settings(
+            provider=provider_key,
+            api_key=api_key,
+        )
 
-        status.update(label="Completato!", state="complete")
-    except ValueError as exc:
-        status.update(label="Errore", state="error")
-        st.error(f"Errore di validazione: {exc}")
-    except Exception as exc:
-        status.update(label="Errore", state="error")
-        st.error(f"Errore imprevisto: {exc}")
-    finally:
-        tmp_video.unlink(missing_ok=True)
+        generator = DocumentationGenerator(
+            settings=settings,
+            video_path=tmp_video,
+            html_mode=html_mode,
+        )
+
+        progress_bar = st.progress(0)
+        status = st.status(f"Avvio generazione {uploaded.name}...", expanded=True)
+        result_data: dict | None = None
+
+        try:
+            for event in generator.generate():
+                pct = event.get("pct", 0)
+                msg = event.get("message", "")
+                progress_bar.progress(pct / 100, text=msg)
+                status.update(label=msg)
+
+                if "result" in event:
+                    result_data = event["result"]
+
+            status.update(label="Completato!", state="complete")
+        except ValueError as exc:
+            status.update(label="Errore", state="error")
+            st.error(f"{uploaded.name} — Errore di validazione: {exc}")
+            continue
+        except Exception as exc:
+            status.update(label="Errore", state="error")
+            st.error(f"{uploaded.name} — Errore imprevisto: {exc}")
+            continue
+        finally:
+            tmp_video.unlink(missing_ok=True)
+
+        if result_data is not None:
+            result_data["filename"] = uploaded.name
+            all_results.append(result_data)
+            stem = Path(uploaded.name).stem
+            all_zip_contents[stem] = result_data["zip_bytes"]
 
     # --- Results -------------------------------------------------------------
-    if result_data is not None:
-        st.success("Documentazione generata con successo!")
+    if all_results:
+        st.success(f"Completato: {len(all_results)}/{len(uploaded_files)} video processati.")
 
-        # Metrics
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Step trovati", result_data["n_steps"])
-        col2.metric("Screenshot estratti", result_data["n_screenshots"])
-        col3.metric("Durata", f'{result_data["duration_s"]:.1f}s')
+        for result_data in all_results:
+            filename = result_data["filename"]
+            st.markdown(f"### {filename}")
 
-        col4, col5, col6 = st.columns(3)
-        col4.metric("Token input", f'{result_data["input_tokens"]:,}')
-        col5.metric("Token output", f'{result_data["output_tokens"]:,}')
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Step trovati", result_data["n_steps"])
+            col2.metric("Screenshot estratti", result_data["n_screenshots"])
+            col3.metric("Durata", f'{result_data["duration_s"]:.1f}s')
 
-        # Cost estimate
-        costs = _COST_TABLE.get(provider_key, (0, 0))
-        cost_usd = (
-            result_data["input_tokens"] * costs[0] / 1_000_000
-            + result_data["output_tokens"] * costs[1] / 1_000_000
-        )
-        col6.metric("Costo stimato", f"${cost_usd:.4f}")
+            col4, col5, col6 = st.columns(3)
+            col4.metric("Token input", f'{result_data["input_tokens"]:,}')
+            col5.metric("Token output", f'{result_data["output_tokens"]:,}')
 
-        # Download
-        st.download_button(
-            label="Scarica ZIP",
-            data=result_data["zip_bytes"],
-            file_name=f"video_to_docs_{result_data['title'][:30]}.zip",
-            mime="application/zip",
-            type="primary",
-        )
+            costs = _COST_TABLE.get(provider_key, (0, 0))
+            cost_usd = (
+                result_data["input_tokens"] * costs[0] / 1_000_000
+                + result_data["output_tokens"] * costs[1] / 1_000_000
+            )
+            col6.metric("Costo stimato", f"${cost_usd:.4f}")
+
+            # Preview section
+            with st.expander(f"Preview — {filename}"):
+                st.markdown(f"**Chunk RAG prodotti:** {result_data['n_rag_chunks']}")
+                st.markdown("**procedura.txt**")
+                st.text(result_data["procedura_txt"])
+
+            # Per-video download
+            stem = Path(filename).stem
+            st.download_button(
+                label=f"Scarica ZIP — {filename}",
+                data=result_data["zip_bytes"],
+                file_name=f"video_to_docs_{result_data['title'][:30]}.zip",
+                mime="application/zip",
+                key=f"dl_{stem}",
+            )

@@ -9,9 +9,9 @@ from ..config import Settings, _MODEL_MAP
 from ..providers.base import BaseProvider
 from ..providers.google import GoogleProvider
 from ..providers.openrouter import OpenRouterProvider
-from ..providers.openai_provider import OpenAIProvider
 from ..output.html_builder import build_html_folder, build_html_standalone
-from ..output.txt_builder import build_glossario, build_note
+from ..output.txt_builder import build_glossario, build_procedura
+from ..output.rag_builder import build_rag_jsonl
 from ..output.logger import Logger, build_log_txt
 from ..output.zipper import create_zip
 from .prompts import SYSTEM_PROMPT, USER_PROMPT
@@ -36,8 +36,6 @@ def _make_provider(settings: Settings) -> BaseProvider:
             model=settings.model,
             max_mb=settings.openrouter_max_mb,
         )
-    if settings.provider == "openai":
-        return OpenAIProvider(api_key=settings.api_key, model=settings.model)
     raise ValueError(f"Provider sconosciuto: {settings.provider!r}")
 
 
@@ -119,11 +117,17 @@ class DocumentationGenerator:
             files_generated["glossario.txt"] = glossario_txt.encode("utf-8")
             logger.log("INFO", "Glossario generato")
 
-            # --- Note ---
-            yield {"pct": 93, "message": "Generazione note..."}
-            note_txt = build_note(data)
-            files_generated["note.txt"] = note_txt.encode("utf-8")
-            logger.log("INFO", "Note generate")
+            # --- Procedura ---
+            yield {"pct": 90, "message": "Generazione procedura..."}
+            procedura_txt = build_procedura(data, self._video_path.name)
+            files_generated["procedura.txt"] = procedura_txt.encode("utf-8")
+            logger.log("INFO", "Procedura generata")
+
+            # --- RAG JSONL ---
+            yield {"pct": 93, "message": "Generazione RAG chunks..."}
+            rag_jsonl = build_rag_jsonl(data, self._video_path.name)
+            files_generated["rag_chunks.jsonl"] = rag_jsonl.encode("utf-8")
+            logger.log("INFO", f"RAG JSONL generato")
 
             # --- Log ---
             log_txt = build_log_txt(logger.lines)
@@ -149,6 +153,8 @@ class DocumentationGenerator:
                     "n_steps": n_steps,
                     "n_screenshots": n_screenshots,
                     "title": data.get("title", "Documentazione"),
+                    "procedura_txt": procedura_txt,
+                    "n_rag_chunks": rag_jsonl.count("\n") + 1 if rag_jsonl else 0,
                 },
             }
         finally:

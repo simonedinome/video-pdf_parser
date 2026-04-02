@@ -36,6 +36,7 @@ def create_zip(
             # In folder mode, skip the standalone-variant HTML
             if mode == "folder" and name == "documentazione_standalone.html":
                 continue
+            # HTML files only included when html_mode is not "none"
             zf.writestr(name, content)
 
         # Include screenshots for folder / both modes
