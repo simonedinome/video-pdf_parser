@@ -7,6 +7,7 @@ from google import genai
 from google.genai import types as genai_types
 
 from .base import BaseProvider
+from .retry import with_retry
 
 
 class GoogleProvider(BaseProvider):
@@ -38,24 +39,26 @@ class GoogleProvider(BaseProvider):
             raise RuntimeError(f"Google file processing failed: {uploaded.state}")
 
         try:
-            response = self._client.models.generate_content(
-                model=self._model,
-                contents=[
-                    genai_types.Content(
-                        role="user",
-                        parts=[
-                            genai_types.Part.from_uri(
-                                file_uri=uploaded.uri,
-                                mime_type=mime_type,
-                            ),
-                            genai_types.Part.from_text(text=user_prompt),
-                        ],
+            response = with_retry(
+                lambda: self._client.models.generate_content(
+                    model=self._model,
+                    contents=[
+                        genai_types.Content(
+                            role="user",
+                            parts=[
+                                genai_types.Part.from_uri(
+                                    file_uri=uploaded.uri,
+                                    mime_type=mime_type,
+                                ),
+                                genai_types.Part.from_text(text=user_prompt),
+                            ],
+                        ),
+                    ],
+                    config=genai_types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        temperature=0.2,
                     ),
-                ],
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0.2,
-                ),
+                )
             )
         finally:
             # Always clean up the uploaded file

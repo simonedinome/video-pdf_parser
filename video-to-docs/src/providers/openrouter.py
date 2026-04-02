@@ -6,6 +6,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from .base import BaseProvider
+from .retry import with_retry
 
 
 class OpenRouterProvider(BaseProvider):
@@ -44,22 +45,24 @@ class OpenRouterProvider(BaseProvider):
         video_b64 = base64.b64encode(video_path.read_bytes()).decode()
         data_url = f"data:{mime_type};base64,{video_b64}"
 
-        response = self._client.chat.completions.create(
-            model=self._model,
-            temperature=0.2,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": data_url},
-                        },
-                        {"type": "text", "text": user_prompt},
-                    ],
-                },
-            ],
+        response = with_retry(
+            lambda: self._client.chat.completions.create(
+                model=self._model,
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": data_url},
+                            },
+                            {"type": "text", "text": user_prompt},
+                        ],
+                    },
+                ],
+            )
         )
 
         raw = response.choices[0].message.content or ""

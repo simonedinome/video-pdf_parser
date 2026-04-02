@@ -11,13 +11,11 @@ load_dotenv()
 _ENV_KEY_MAP: dict[str, str] = {
     "google": "GOOGLE_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
-    "openai": "OPENAI_API_KEY",
 }
 
 _MODEL_MAP: dict[str, str] = {
     "google": "gemini-2.5-flash",
     "openrouter": "google/gemini-2.5-flash",
-    "openai": "gpt-4o",
 }
 
 SUPPORTED_EXTENSIONS: list[str] = ["mp4", "mov", "avi", "mkv", "webm"]

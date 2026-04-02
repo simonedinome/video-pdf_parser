@@ -44,4 +44,9 @@ def parse_response(raw: str) -> dict:
             "La risposta deve contenere almeno uno step nella lista 'steps'."
         )
 
+    # Soft validation: embedding_keywords is optional but must be a list if present
+    for step in data["steps"]:
+        if "embedding_keywords" in step and not isinstance(step["embedding_keywords"], list):
+            step["embedding_keywords"] = []
+
     return data

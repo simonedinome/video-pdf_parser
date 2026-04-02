@@ -27,7 +27,10 @@ Il JSON deve avere esattamente questa struttura:
       "title": "Titolo breve dello step",
       "description": "Descrizione dettagliata di cosa viene fatto in questo passaggio. \
 Includi dettagli su dove cliccare, cosa digitare, quali menu aprire.",
-      "notes": "Eventuali avvertenze o suggerimenti per questo step (opzionale)"
+      "notes": "Eventuali avvertenze o suggerimenti per questo step (opzionale)",
+      "embedding_keywords": [
+        "keyword1", "keyword2", "keyword3"
+      ]
     }
   ],
   "glossary": [
@@ -50,4 +53,7 @@ a qualcuno di riprodurre l'azione senza vedere il video
 4. Il glossario deve includere tutti i termini tecnici menzionati o mostrati
 5. Le note devono includere best practice, avvertenze e suggerimenti utili
 6. Rispondi SOLO con il JSON, senza testo aggiuntivo prima o dopo
-7. Il JSON deve essere valido e parsabile"""
+7. Il JSON deve essere valido e parsabile
+8. Il campo embedding_keywords di ogni step deve contenere 5-8 parole chiave dense e specifiche \
+per il retrieval semantico di quello step: includi verbi d'azione, nomi di elementi UI, \
+termini tecnici mostrati in quel preciso step"""
