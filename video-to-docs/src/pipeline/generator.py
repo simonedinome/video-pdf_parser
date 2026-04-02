@@ -29,12 +29,17 @@ _MIME_MAP: dict[str, str] = {
 
 def _make_provider(settings: Settings) -> BaseProvider:
     if settings.provider == "google":
-        return GoogleProvider(api_key=settings.api_key, model=settings.model)
+        return GoogleProvider(
+            api_key=settings.api_key,
+            model=settings.model,
+            max_retries=settings.max_retries,
+        )
     if settings.provider == "openrouter":
         return OpenRouterProvider(
             api_key=settings.api_key,
             model=settings.model,
             max_mb=settings.openrouter_max_mb,
+            max_retries=settings.max_retries,
         )
     raise ValueError(f"Provider sconosciuto: {settings.provider!r}")
 
@@ -47,8 +52,15 @@ class DocumentationGenerator:
     ``result``.
     """
 
-    def __init__(self, settings: Settings, video_path: Path, html_mode: str) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        video_path: Path,
+        html_mode: str,
+        max_retries: int = 3,
+    ) -> None:
         self._settings = settings
+        self._settings.max_retries = max_retries
         self._video_path = video_path
         self._html_mode = html_mode  # "standalone" | "folder" | "both"
 

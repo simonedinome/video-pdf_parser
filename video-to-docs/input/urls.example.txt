@@ -1,0 +1,5 @@
+# Lista di URL diretti a video da processare
+# Un URL per riga, righe con # ignorate, righe vuote ignorate
+# Esempio:
+# https://example.com/tutorial.mp4
+# https://cdn.example.com/demo.mov

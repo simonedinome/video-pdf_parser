@@ -4,6 +4,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import streamlit as st
 
@@ -64,26 +65,66 @@ with st.sidebar:
     )
     html_mode = HTML_MODE_LABELS[html_mode_label]
 
+    max_retries = st.slider(
+        "Retry per video",
+        min_value=1,
+        max_value=5,
+        value=3,
+        help="Numero massimo di tentativi in caso di errore API",
+    )
+
+    save_to_disk = st.toggle(
+        "Salva output su disco",
+        value=False,
+        help="Se attivo, scrive i file anche in output/{stem}/ sul server",
+    )
+    disk_output_dir = "output"
+
 # ---------------------------------------------------------------------------
 # Main area
 # ---------------------------------------------------------------------------
 st.title("video-to-docs")
 st.markdown("Carica uno o più video e genera documentazione strutturata con AI.")
 
-uploaded_files = st.file_uploader(
-    "Carica video",
-    type=SUPPORTED_EXTENSIONS,
-    accept_multiple_files=True,
-    help=f"Formati supportati: {', '.join(SUPPORTED_EXTENSIONS)}. Max {MAX_UPLOAD_MB} MB per file.",
-)
+# Two input tabs
+tab_file, tab_url = st.tabs(["📁 Carica file", "🔗 URL diretti"])
+
+with tab_file:
+    uploaded_files = st.file_uploader(
+        "Carica video",
+        type=SUPPORTED_EXTENSIONS,
+        accept_multiple_files=True,
+        help=f"Formati supportati: {', '.join(SUPPORTED_EXTENSIONS)}. Max {MAX_UPLOAD_MB} MB per file.",
+    )
+
+with tab_url:
+    urls_text = st.text_area(
+        "URL video (uno per riga)",
+        placeholder="https://example.com/tutorial.mp4\nhttps://cdn.example.com/demo.mov",
+        help="Inserisci un URL per riga. Righe vuote ignorate.",
+    )
+
+# ---------------------------------------------------------------------------
+# Build unified queue
+# ---------------------------------------------------------------------------
+queue: list[dict] = []
+
+for uf in (uploaded_files or []):
+    queue.append({"type": "file", "name": uf.name, "data": uf})
+
+for raw_line in (urls_text or "").splitlines():
+    line = raw_line.strip()
+    if not line:
+        continue
+    queue.append({"type": "url", "name": line.split("/")[-1] or line, "url": line})
 
 generate_btn = st.button(
     "Genera documentazione",
     type="primary",
-    disabled=not uploaded_files,
+    disabled=not queue,
 )
 
-if generate_btn and uploaded_files:
+if generate_btn and queue:
     # --- Validations ---------------------------------------------------------
     if not api_key:
         st.error("Inserisci una API key nella sidebar o configurala nel file .env.")
@@ -97,26 +138,61 @@ if generate_btn and uploaded_files:
         )
 
     all_results: list[dict] = []
-    all_zip_contents: dict[str, bytes] = {}  # stem -> zip_bytes (for individual downloads)
 
-    for idx, uploaded in enumerate(uploaded_files, 1):
-        st.markdown(f"**Video {idx}/{len(uploaded_files)}: {uploaded.name}**")
+    for idx, item in enumerate(queue, 1):
+        item_name = item["name"]
+        st.markdown(f"**Video {idx}/{len(queue)}: {item_name}**")
 
-        file_size_mb = len(uploaded.getvalue()) / (1024 * 1024)
-        if file_size_mb > MAX_UPLOAD_MB:
-            st.error(f"{uploaded.name}: file {file_size_mb:.1f} MB — il limite è {MAX_UPLOAD_MB} MB. Saltato.")
-            continue
+        # ------------------------------------------------------------------
+        # Resolve video path (file upload or URL download)
+        # ------------------------------------------------------------------
+        tmp_video: Path | None = None
+        tmp_url_dir: Path | None = None
 
-        if provider_key == "openrouter" and file_size_mb > 19:
-            st.error(
-                f"{uploaded.name}: {file_size_mb:.1f} MB. "
-                "OpenRouter supporta al massimo 19 MB. Usa Google Gemini per file più grandi. Saltato."
-            )
-            continue
+        if item["type"] == "file":
+            uploaded = item["data"]
+            file_size_mb = len(uploaded.getvalue()) / (1024 * 1024)
 
-        tmp_video = Path(tempfile.mktemp(suffix=Path(uploaded.name).suffix))
-        tmp_video.write_bytes(uploaded.getvalue())
+            if file_size_mb > MAX_UPLOAD_MB:
+                st.error(
+                    f"{item_name}: file {file_size_mb:.1f} MB — il limite è {MAX_UPLOAD_MB} MB. Saltato."
+                )
+                continue
 
+            if provider_key == "openrouter" and file_size_mb > 19:
+                st.error(
+                    f"{item_name}: {file_size_mb:.1f} MB. "
+                    "OpenRouter supporta al massimo 19 MB. Usa Google Gemini per file più grandi. Saltato."
+                )
+                continue
+
+            tmp_video = Path(tempfile.mktemp(suffix=Path(item_name).suffix))
+            tmp_video.write_bytes(uploaded.getvalue())
+
+        else:
+            # URL item — validate and download
+            url = item["url"]
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                st.error(f"URL non valido (deve iniziare con http:// o https://): {url}")
+                continue
+
+            with st.status(f"Download in corso: {url}...", expanded=False):
+                from src.downloader import download_url
+                tmp_url_dir = Path(tempfile.mkdtemp(prefix="vd_url_"))
+                try:
+                    tmp_video = download_url(url, tmp_url_dir)
+                    st.write(f"Scaricato: {tmp_video.name}")
+                except Exception as exc:
+                    st.error(f"{item_name} — Download fallito: {exc}")
+                    import shutil as _shutil
+                    _shutil.rmtree(tmp_url_dir, ignore_errors=True)
+                    tmp_url_dir = None
+                    continue
+
+        # ------------------------------------------------------------------
+        # Run pipeline
+        # ------------------------------------------------------------------
         settings = Settings(
             provider=provider_key,
             api_key=api_key,
@@ -126,10 +202,11 @@ if generate_btn and uploaded_files:
             settings=settings,
             video_path=tmp_video,
             html_mode=html_mode,
+            max_retries=max_retries,
         )
 
         progress_bar = st.progress(0)
-        status = st.status(f"Avvio generazione {uploaded.name}...", expanded=True)
+        status = st.status(f"Avvio generazione {item_name}...", expanded=True)
         result_data: dict | None = None
 
         try:
@@ -145,24 +222,41 @@ if generate_btn and uploaded_files:
             status.update(label="Completato!", state="complete")
         except ValueError as exc:
             status.update(label="Errore", state="error")
-            st.error(f"{uploaded.name} — Errore di validazione: {exc}")
+            st.error(f"{item_name} — Errore di validazione: {exc}")
             continue
         except Exception as exc:
             status.update(label="Errore", state="error")
-            st.error(f"{uploaded.name} — Errore imprevisto: {exc}")
+            st.error(f"{item_name} — Errore imprevisto: {exc}")
             continue
         finally:
-            tmp_video.unlink(missing_ok=True)
+            if tmp_video is not None:
+                tmp_video.unlink(missing_ok=True)
+            if tmp_url_dir is not None:
+                import shutil as _shutil
+                _shutil.rmtree(tmp_url_dir, ignore_errors=True)
 
         if result_data is not None:
-            result_data["filename"] = uploaded.name
+            result_data["filename"] = item_name
+
+            # Optionally write to disk
+            if save_to_disk:
+                import io
+                import zipfile
+
+                stem = Path(item_name).stem
+                video_out_dir = Path(disk_output_dir) / stem
+                video_out_dir.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(io.BytesIO(result_data["zip_bytes"]), "r") as zf:
+                    for fname in zf.namelist():
+                        dest = video_out_dir / fname
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_bytes(zf.read(fname))
+
             all_results.append(result_data)
-            stem = Path(uploaded.name).stem
-            all_zip_contents[stem] = result_data["zip_bytes"]
 
     # --- Results -------------------------------------------------------------
     if all_results:
-        st.success(f"Completato: {len(all_results)}/{len(uploaded_files)} video processati.")
+        st.success(f"Completato: {len(all_results)}/{len(queue)} video processati.")
 
         for result_data in all_results:
             filename = result_data["filename"]

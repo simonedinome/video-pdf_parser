@@ -13,9 +13,12 @@ from .retry import with_retry
 class GoogleProvider(BaseProvider):
     """Provider that uses the Google Gemini API via *google-genai* SDK."""
 
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash") -> None:
+    def __init__(
+        self, api_key: str, model: str = "gemini-2.5-flash", max_retries: int = 3
+    ) -> None:
         self._client = genai.Client(api_key=api_key)
         self._model = model
+        self._max_retries = max_retries
 
     def generate(
         self,
@@ -58,7 +61,8 @@ class GoogleProvider(BaseProvider):
                         system_instruction=system_prompt,
                         temperature=0.2,
                     ),
-                )
+                ),
+                max_attempts=self._max_retries,
             )
         finally:
             # Always clean up the uploaded file

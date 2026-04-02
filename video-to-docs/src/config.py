@@ -36,6 +36,7 @@ class Settings:
     provider: str = "google"
     api_key: str = ""
     openrouter_max_mb: int = 19
+    max_retries: int = 3
 
     @property
     def model(self) -> str:
