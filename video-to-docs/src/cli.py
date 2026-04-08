@@ -7,7 +7,10 @@ import logging
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 
@@ -24,6 +27,22 @@ _VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 _CHECKPOINT_FILE = "processed.json"
 
 
+# ---------------------------------------------------------------------------
+# Queue item
+# ---------------------------------------------------------------------------
+
+@dataclass
+class QueueItem:
+    name: str
+    source: Literal["file", "url"]
+    path: Path | None = None
+    url: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint helpers
+# ---------------------------------------------------------------------------
+
 def _load_checkpoint(output_dir: Path) -> dict:
     cp_path = output_dir / _CHECKPOINT_FILE
     if cp_path.exists():
@@ -39,12 +58,30 @@ def _save_checkpoint(output_dir: Path, checkpoint: dict) -> None:
     cp_path.write_text(json.dumps(checkpoint, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# Input discovery
+# ---------------------------------------------------------------------------
+
 def _list_videos(input_dir: Path) -> list[Path]:
     return sorted(
         p for p in input_dir.iterdir()
         if p.is_file() and p.suffix.lower() in _VIDEO_EXTENSIONS
     )
 
+
+def _load_urls(path: Path) -> list[str]:
+    """Read *path* and return non-empty, non-comment lines."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return [
+        line.strip()
+        for line in lines
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Video processing
+# ---------------------------------------------------------------------------
 
 def _process_video(
     video_path: Path,
@@ -53,13 +90,14 @@ def _process_video(
     api_key: str,
     max_retries: int,
     html_mode: str = "standalone",
-) -> None:
-    """Run the full pipeline for a single video and write output files."""
+) -> tuple[float, int]:
+    """Run the full pipeline for a single video and write output files.
+
+    Returns:
+        Tuple of (duration_s, n_steps).
+    """
     from .config import Settings
     from .pipeline.generator import DocumentationGenerator
-    from .output.txt_builder import build_glossario, build_procedura
-    from .output.rag_builder import build_rag_jsonl
-    from .output.logger import build_log_txt
 
     settings = Settings(provider=provider, api_key=api_key)
 
@@ -75,6 +113,7 @@ def _process_video(
             settings=settings,
             video_path=tmp_video,
             html_mode=html_mode,
+            max_retries=max_retries,
         )
 
         result_data: dict | None = None
@@ -88,9 +127,6 @@ def _process_video(
         if result_data is None:
             raise RuntimeError("Pipeline completata senza risultato")
 
-        # Write individual output files from the ZIP
-        # Re-generate outputs directly for clean file writes
-        # (generator already has the data — use zip_bytes is easiest)
         import io
         import zipfile
 
@@ -101,10 +137,15 @@ def _process_video(
                 dest.write_bytes(zf.read(name))
 
         logger.info("[%s] Output scritto in %s", video_path.name, video_out_dir)
+        return result_data["duration_s"], result_data["n_steps"]
 
     finally:
         tmp_video.unlink(missing_ok=True)
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -133,6 +174,12 @@ def main() -> None:
         default=int(os.environ.get("MAX_RETRIES", "3")),
         help="Numero massimo di retry per ogni video",
     )
+    parser.add_argument(
+        "--urls-file",
+        default=None,
+        metavar="PATH",
+        help="File .txt con un URL per riga (commenti con # ignorati)",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -151,9 +198,23 @@ def main() -> None:
         )
         raise SystemExit(1)
 
-    videos = _list_videos(input_dir)
-    if not videos:
-        logger.info("Nessun video trovato in %s — nulla da fare.", input_dir)
+    # Build queue: files first, then URLs
+    queue: list[QueueItem] = []
+
+    for video_path in _list_videos(input_dir):
+        queue.append(QueueItem(name=video_path.name, source="file", path=video_path))
+
+    if args.urls_file:
+        urls_file = Path(args.urls_file)
+        if not urls_file.exists():
+            logger.error("--urls-file non trovato: %s", urls_file)
+            raise SystemExit(1)
+        for url in _load_urls(urls_file):
+            name = url.split("/")[-1] or url
+            queue.append(QueueItem(name=name, source="url", url=url))
+
+    if not queue:
+        logger.info("Nessun video trovato e nessun URL specificato — nulla da fare.")
         return
 
     checkpoint = _load_checkpoint(output_dir)
@@ -161,44 +222,96 @@ def main() -> None:
     failed_map: dict[str, str] = checkpoint.get("failed", {})
 
     logger.info(
-        "%d video trovati, %d già processati, %d falliti in precedenza.",
-        len(videos),
+        "%d elementi in coda, %d già processati, %d falliti in precedenza.",
+        len(queue),
         len(processed_set),
         len(failed_map),
     )
 
-    for video_path in videos:
-        name = video_path.name
-        if name in processed_set:
-            logger.info("Skipping %s (già processato)", name)
+    # Initialise RunLogger
+    from .output.run_logger import RunLogger
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_logger = RunLogger(output_dir=output_dir, run_id=run_id)
+
+    succeeded = 0
+    failed_count = 0
+    skipped_count = 0
+
+    for item in queue:
+        if item.name in processed_set:
+            logger.info("Skipping %s (già processato)", item.name)
+            run_logger.video_skipped(item.name, "già processato")
+            skipped_count += 1
             continue
 
-        logger.info("Inizio elaborazione: %s", name)
+        run_logger.video_start(item.name)
+        logger.info("Inizio elaborazione: %s", item.name)
+
+        # For URL items: download to a temp dir first
+        tmp_url_dir: Path | None = None
+        video_path: Path
+
+        if item.source == "url":
+            from .downloader import download_url
+            tmp_url_dir = Path(tempfile.mkdtemp(prefix="vd_url_"))
+            try:
+                logger.info("Download URL: %s", item.url)
+                video_path = download_url(item.url, tmp_url_dir)  # type: ignore[arg-type]
+            except Exception as exc:
+                error_msg = f"{type(exc).__name__}: {exc}"
+                logger.error("Download fallito: %s — %s", item.name, error_msg)
+                run_logger.video_failed(item.name, 1, args.max_retries, error_msg)
+                failed_map[item.name] = error_msg
+                checkpoint["failed"] = failed_map
+                _save_checkpoint(output_dir, checkpoint)
+                failed_count += 1
+                shutil.rmtree(tmp_url_dir, ignore_errors=True)
+                continue
+        else:
+            video_path = item.path  # type: ignore[assignment]
+
         try:
-            _process_video(
+            duration_s, n_steps = _process_video(
                 video_path=video_path,
                 output_dir=output_dir,
                 provider=args.provider,
                 api_key=api_key,
                 max_retries=args.max_retries,
             )
-            processed_set.add(name)
-            failed_map.pop(name, None)
+            processed_set.add(item.name)
+            failed_map.pop(item.name, None)
             checkpoint["processed"] = sorted(processed_set)
             checkpoint["failed"] = failed_map
             _save_checkpoint(output_dir, checkpoint)
-            logger.info("Completato: %s", name)
+            run_logger.video_success(item.name, duration_s, n_steps)
+            logger.info("Completato: %s", item.name)
+            succeeded += 1
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
-            logger.error("Fallito: %s — %s", name, error_msg)
-            failed_map[name] = error_msg
+            logger.error("Fallito: %s — %s", item.name, error_msg)
+            run_logger.video_failed(item.name, 1, args.max_retries, error_msg)
+            failed_map[item.name] = error_msg
             checkpoint["failed"] = failed_map
             _save_checkpoint(output_dir, checkpoint)
+            failed_count += 1
+        finally:
+            if tmp_url_dir is not None:
+                shutil.rmtree(tmp_url_dir, ignore_errors=True)
+
+    total = len(queue)
+    run_logger.summary(
+        total=total,
+        succeeded=succeeded,
+        failed=failed_count,
+        skipped=skipped_count,
+    )
+    run_logger.close()
 
     logger.info(
-        "Batch completato. Processati: %d, Falliti: %d",
-        len(processed_set),
-        len(failed_map),
+        "Batch completato. Processati: %d, Falliti: %d, Saltati: %d",
+        succeeded,
+        failed_count,
+        skipped_count,
     )
 
 

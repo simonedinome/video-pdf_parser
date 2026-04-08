@@ -1,0 +1,11 @@
+{
+  "name": "video-to-docs",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y ffmpeg && pip install -r video-to-docs/requirements.txt",
+  "forwardPorts": [8501],
+  "portsAttributes": {
+    "8501": {
+      "label": "Streamlit"
+    }
+  }
+}

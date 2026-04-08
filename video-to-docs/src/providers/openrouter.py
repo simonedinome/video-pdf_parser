@@ -20,6 +20,7 @@ class OpenRouterProvider(BaseProvider):
         api_key: str,
         model: str = "google/gemini-2.5-flash",
         max_mb: int = 19,
+        max_retries: int = 3,
     ) -> None:
         self._client = OpenAI(
             api_key=api_key,
@@ -27,6 +28,7 @@ class OpenRouterProvider(BaseProvider):
         )
         self._model = model
         self._max_mb = max_mb
+        self._max_retries = max_retries
 
     def generate(
         self,
@@ -62,7 +64,8 @@ class OpenRouterProvider(BaseProvider):
                         ],
                     },
                 ],
-            )
+            ),
+            max_attempts=self._max_retries,
         )
 
         raw = response.choices[0].message.content or ""

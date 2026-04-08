@@ -205,3 +205,10 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# video-to-docs: ignore video files in input directory
+video-to-docs/input/*.mp4
+video-to-docs/input/*.mov
+video-to-docs/input/*.avi
+video-to-docs/input/*.mkv
+video-to-docs/input/*.webm
